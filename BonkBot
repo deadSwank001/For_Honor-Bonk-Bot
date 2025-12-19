@@ -1,0 +1,139 @@
+# bonk_forhonor_causality.py
+import os
+import pandas as pd
+import numpy as np
+import requests
+import matplotlib.pyplot as plt
+from statsmodels.tsa.stattools import grangercausalitytests, ccf
+from statsmodels.tsa.vector_ar.var_model import VAR
+from scipy import signal
+import warnings
+warnings.filterwarnings("ignore")
+
+# ============================
+#  API KEYS (placeholder)
+# ============================
+"""
+COINGECKO_API_KEY = os.getenv("COINGECKO_API_KEY", "fake_key_123")  # Not required for public endpoints
+STEAM_API_KEY = os.getenv("STEAM_API_KEY", "fake_steam_key_456")   # Not used — we scrape SteamCharts
+
+# ============================
+# 1. Fetch BONK Price Data (daily, 2025)
+# ============================
+def fetch_bonk_price(start_date="2025-01-01", end_date="2025-12-31"):
+    # CoinGecko: bonk is 'bonk' on Solana
+    url = "https://api.coingecko.com/api/v3/coins/bonk/market_chart/range"
+    params = {
+        "vs_currency": "usd",
+        "from": int(pd.Timestamp(start_date).timestamp()),
+        "to": int(pd.Timestamp(end_date).timestamp()),
+        "interval": "daily"  # Only available for >90 days; for <90, use "hourly"
+    }
+    response = requests.get(url, params=params)
+    data = response.json()
+    prices = pd.DataFrame(data["prices"], columns=["timestamp", "price"])
+    prices["date"] = pd.to_datetime(prices["timestamp"], unit="ms").dt.date
+    prices = prices[["date", "price"]].set_index("date")
+    return prices
+
+# ============================
+# 🎮 2. Fetch For Honor Player Count (SteamCharts scraping fallback)
+# ============================
+def fetch_forhonor_players():
+    # SteamCharts doesn't have an API, but we can use a public dataset or simulate
+    # For demo, we'll create synthetic data with spikes in March & July 2025
+    dates = pd.date_range(start="2025-01-01", end="2025-12-31", freq="D")
+    players = np.random.normal(3000, 300, len(dates)).astype(int)
+    
+    # Inject known events:
+    # March 2025: minor patch → small bump
+    march_mask = (dates.month == 3)
+    players[march_mask] += np.random.normal(200, 50, march_mask.sum()).astype(int)
+    
+    # July 10–15, 2025: Virtuosa update → big spike
+    july_event = (dates >= "2025-07-10") & (dates <= "2025-07-15")
+    players[july_event] += np.random.normal(1200, 200, july_event.sum()).astype(int)
+    
+    df = pd.DataFrame({"date": dates.date, "players": np.clip(players, 500, 10000)})
+    df = df.set_index("date")
+    return df
+
+# ============================
+# 🧪 3. Main Analysis
+# ============================
+def main():
+    print("📊 Fetching data...")
+    bonk = fetch_bonk_price()
+    players = fetch_forhonor_players()
+    
+    # Align datasets
+    merged = bonk.join(players, how="inner")
+    merged = merged.dropna()
+    print(f"✅ Merged {len(merged)} days of data.")
+
+    # Ensure stationarity (Granger requires it!)
+    merged["price_diff"] = merged["price"].diff()
+    merged["players_diff"] = merged["players"].diff()
+    merged = merged.dropna()
+
+    # ----------------------------
+    # 🔍 Granger Causality Test
+    # H0: lagged players do NOT Granger-cause price
+    # ----------------------------
+    max_lag = 5  # Test up to 5 days
+    print(f"\n🧪 Granger Causality: Do player counts predict Bonk price?")
+    granger_result = grangercausalitytests(
+        merged[["price_diff", "players_diff"]], 
+        maxlag=max_lag, 
+        verbose=True
+    )
+    
+    # Extract p-values
+    pvals = [round(granger_result[i+1][0]['ssr_ftest'][1], 4) for i in range(max_lag)]
+    print(f"P-values for lags 1-{max_lag}: {pvals}")
+    if any(p < 0.05 for p in pvals):
+        print("✅ Reject H0 at lag(s): evidence players may *predict* price changes.")
+    else:
+        print("❌ Fail to reject H0: no predictive power found.")
+
+    # ----------------------------
+    # 📐 Cross-Correlation Function (CCF)
+    # ----------------------------
+    ccf_vals = ccf(merged["players_diff"], merged["price_diff"], unbiased=True)
+    lags = np.arange(-20, 21)
+    ccf_window = ccf_vals[20-20:20+21]  # centered
+
+    plt.figure(figsize=(10, 4))
+    plt.stem(lags, ccf_window, use_line_collection=True)
+    plt.title("Cross-Correlation: ΔPlayers vs ΔBonk Price")
+    plt.xlabel("Lag (days) | Negative = Players lead Price")
+    plt.ylabel("Correlation")
+    plt.axhline(0, color='k', linestyle='--', alpha=0.3)
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("bonk_forhonor_ccf.png")
+    print("📈 CCF plot saved as 'bonk_forhonor_ccf.png'")
+
+    # ----------------------------
+    # 🎲 Stochastic Convergence Check
+    # After major trades (price jumps > 15%), check if correlation stabilizes
+    # ----------------------------
+    merged["price_return"] = merged["price"].pct_change()
+    major_moves = merged[merged["price_return"].abs() > 0.15]  # >15% moves
+    
+    if not major_moves.empty:
+        print(f"\n🔍 Detected {len(major_moves)} major price moves (>15%).")
+        for idx, row in major_moves.iterrows():
+            window_start = idx - pd.Timedelta(days=3)
+            window_end = idx + pd.Timedelta(days=7)
+            window = merged[window_start:window_end]
+            if len(window) > 5:
+                corr = window["players"].corr(window["price"])
+                print(f"  {idx}: 3d before → 7d after correlation = {corr:.3f}")
+    else:
+        print("\n🔍 No major price moves (>15%) detected in 2025.")
+
+    print("\n✅ Analysis complete!")
+
+if __name__ == "__main__":
+    main()
